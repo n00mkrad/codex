@@ -683,6 +683,13 @@ elif mode == "continue_false":
         "continue": False,
         "stopReason": reason
     }}))
+elif mode == "rewrite":
+    print(json.dumps({{
+        "hookSpecificOutput": {{
+            "hookEventName": "PostToolUse",
+            "updatedMCPToolOutput": reason
+        }}
+    }}))
 elif mode == "exit_2":
     sys.stderr.write(reason + "\n")
     raise SystemExit(2)
@@ -3585,6 +3592,75 @@ async fn post_tool_use_exit_two_rejects_code_mode_tool_promise() -> Result<()> {
 }
 
 #[tokio::test]
+async fn post_tool_use_rewrites_code_mode_tool_result_without_rejecting() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = start_mock_server().await;
+    let call_id = "posttooluse-code-mode-rewrite";
+    let command = "printf original-code-mode-output";
+    let command_json = serde_json::to_string(command).context("serialize post hook command")?;
+    let code = format!(
+        r#"
+const result = await tools.exec_command({{ cmd: {command_json} }});
+text(JSON.stringify({{ kind: "success", result }}));
+"#
+    );
+    let responses = mount_sse_sequence(
+        &server,
+        vec![
+            sse(vec![
+                ev_response_created("resp-1"),
+                ev_custom_tool_call(call_id, "exec", &code),
+                ev_completed("resp-1"),
+            ]),
+            sse(vec![
+                ev_response_created("resp-2"),
+                ev_assistant_message("msg-1", "post hook code mode rewrite observed"),
+                ev_completed("resp-2"),
+            ]),
+        ],
+    )
+    .await;
+
+    let rewritten = "rewritten-code-mode-output";
+    let mut builder = test_codex()
+        .with_model("test-gpt-5.1-codex")
+        .with_pre_build_hook(|home| {
+            write_post_tool_use_hook(home, Some("^Bash$"), "rewrite", rewritten)
+                .expect("failed to write post tool use rewrite hook fixture");
+        })
+        .with_config(|config| {
+            let _ = config.features.enable(Feature::CodeMode);
+            trust_discovered_hooks(config);
+        });
+    let test = builder.build(&server).await?;
+
+    test.submit_turn_with_permission_profile(
+        "run the rewritten shell command from code mode",
+        PermissionProfile::Disabled,
+    )
+    .await?;
+
+    let requests = responses.requests();
+    assert_eq!(requests.len(), 2);
+    let output_item = requests[1].custom_tool_call_output(call_id);
+    let output = code_mode_custom_tool_output_text(&output_item);
+    assert!(output.contains(r#""kind":"success""#));
+    assert!(output.contains(rewritten));
+    assert!(!output.contains("original-code-mode-output"));
+
+    let hook_inputs = read_post_tool_use_hook_inputs(test.codex_home_path())?;
+    assert_eq!(hook_inputs.len(), 1);
+    assert_eq!(hook_inputs[0]["tool_input"]["command"], command);
+    assert_eq!(
+        hook_inputs[0]["tool_response"],
+        Value::String("original-code-mode-output".to_string())
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn plugin_pre_tool_use_blocks_shell_command_before_execution() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
@@ -4418,6 +4494,66 @@ async fn post_tool_use_records_additional_context_for_shell_command() -> Result<
         hook_inputs[0]["turn_id"]
             .as_str()
             .is_some_and(|turn_id| !turn_id.is_empty())
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn post_tool_use_rewrites_shell_command_output() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = start_mock_server().await;
+    let call_id = "posttooluse-shell-command-rewrite";
+    let command = "printf original-output".to_string();
+    let args = serde_json::json!({ "command": command });
+    let responses = mount_sse_sequence(
+        &server,
+        vec![
+            sse(vec![
+                ev_response_created("resp-1"),
+                core_test_support::responses::ev_function_call(
+                    call_id,
+                    "shell_command",
+                    &serde_json::to_string(&args)?,
+                ),
+                ev_completed("resp-1"),
+            ]),
+            sse(vec![
+                ev_response_created("resp-2"),
+                ev_assistant_message("msg-1", "post hook rewrite observed"),
+                ev_completed("resp-2"),
+            ]),
+        ],
+    )
+    .await;
+
+    let rewritten = "rewritten-output";
+    let mut builder = test_codex()
+        .with_pre_build_hook(|home| {
+            write_post_tool_use_hook(home, Some("^Bash$"), "rewrite", rewritten)
+                .expect("failed to write post tool use hook test fixture");
+        })
+        .with_config(trust_discovered_hooks);
+    let test = builder.build(&server).await?;
+
+    test.submit_turn("run the shell command with output rewrite")
+        .await?;
+
+    let requests = responses.requests();
+    assert_eq!(requests.len(), 2);
+    let output_item = requests[1].function_call_output(call_id);
+    let output = output_item
+        .get("output")
+        .and_then(Value::as_str)
+        .expect("rewritten shell command output string");
+    assert_eq!(output, rewritten);
+
+    let hook_inputs = read_post_tool_use_hook_inputs(test.codex_home_path())?;
+    assert_eq!(hook_inputs.len(), 1);
+    assert_eq!(
+        hook_inputs[0]["tool_response"],
+        Value::String("original-output".to_string())
     );
 
     Ok(())

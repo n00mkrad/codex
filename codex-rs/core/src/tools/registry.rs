@@ -209,6 +209,38 @@ impl ToolOutput for PostToolUseFeedbackOutput {
     }
 }
 
+struct PostToolUseUpdatedOutput {
+    original: Box<dyn ToolOutput>,
+    updated: Value,
+}
+
+impl ToolOutput for PostToolUseUpdatedOutput {
+    fn log_preview(&self) -> String {
+        self.original.log_preview()
+    }
+
+    fn success_for_logging(&self) -> bool {
+        self.original.success_for_logging()
+    }
+
+    fn contains_external_context(&self) -> bool {
+        self.original.contains_external_context()
+    }
+
+    fn to_response_item(&self, call_id: &str, payload: &ToolPayload) -> ResponseInputItem {
+        let text = match &self.updated {
+            Value::String(text) => text.clone(),
+            updated => updated.to_string(),
+        };
+        FunctionToolOutput::from_text(text, Some(self.original.success_for_logging()))
+            .to_response_item(call_id, payload)
+    }
+
+    fn code_mode_result(&self, _payload: &ToolPayload) -> Value {
+        self.updated.clone()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PreToolUsePayload {
     /// Hook-facing tool name model.
@@ -661,6 +693,11 @@ impl ToolRegistry {
                                 feedback_message,
                                 /*success*/ None,
                             ),
+                        });
+                    } else if let Some(updated_tool_output) = outcome.updated_tool_output {
+                        result.result = Box::new(PostToolUseUpdatedOutput {
+                            original: result.result,
+                            updated: updated_tool_output,
                         });
                     }
                 }

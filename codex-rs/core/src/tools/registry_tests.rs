@@ -371,6 +371,72 @@ fn post_tool_use_feedback_output_keeps_code_mode_result_typed() {
     );
 }
 
+#[test]
+fn post_tool_use_updated_output_rewrites_model_and_code_mode_results() {
+    let result = AnyToolResult {
+        call_id: "call-1".to_string(),
+        payload: ToolPayload::Function {
+            arguments: "{}".to_string(),
+        },
+        result: Box::new(PostToolUseUpdatedOutput {
+            original: Box::new(crate::tools::context::FunctionToolOutput::from_text(
+                "original".to_string(),
+                Some(true),
+            )),
+            updated: serde_json::json!("rewritten"),
+        }),
+        post_tool_use_payload: None,
+    };
+
+    assert_eq!(
+        result.into_response(),
+        crate::tools::context::FunctionToolOutput::from_text("rewritten".to_string(), Some(true),)
+            .to_response_item(
+                "call-1",
+                &ToolPayload::Function {
+                    arguments: "{}".to_string(),
+                },
+            )
+    );
+
+    let result = AnyToolResult {
+        call_id: "call-1".to_string(),
+        payload: ToolPayload::Function {
+            arguments: "{}".to_string(),
+        },
+        result: Box::new(PostToolUseUpdatedOutput {
+            original: Box::new(crate::tools::context::FunctionToolOutput::from_text(
+                "original".to_string(),
+                Some(true),
+            )),
+            updated: serde_json::json!("rewritten"),
+        }),
+        post_tool_use_payload: None,
+    };
+
+    assert_eq!(result.code_mode_result(), serde_json::json!("rewritten"));
+}
+
+#[test]
+fn post_tool_use_updated_output_keeps_structured_code_mode_result_typed() {
+    let updated = serde_json::json!({ "typed": true });
+    let result = AnyToolResult {
+        call_id: "call-1".to_string(),
+        payload: ToolPayload::Function {
+            arguments: "{}".to_string(),
+        },
+        result: Box::new(PostToolUseUpdatedOutput {
+            original: Box::new(codex_tools::JsonToolOutput::new(
+                serde_json::json!({ "original": true }),
+            )),
+            updated: updated.clone(),
+        }),
+        post_tool_use_payload: None,
+    };
+
+    assert_eq!(result.code_mode_result(), updated);
+}
+
 #[tokio::test]
 async fn dispatch_notifies_tool_lifecycle_contributors() -> anyhow::Result<()> {
     let (mut session, turn) = crate::session::tests::make_session_and_context().await;

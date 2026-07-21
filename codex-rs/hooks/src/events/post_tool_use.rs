@@ -43,6 +43,7 @@ pub struct PostToolUseOutcome {
     pub should_block: bool,
     pub additional_contexts: Vec<String>,
     pub feedback_message: Option<String>,
+    pub updated_tool_output: Option<Value>,
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -50,6 +51,7 @@ struct PostToolUseHandlerData {
     should_block: bool,
     additional_contexts_for_model: Vec<AdditionalContext>,
     feedback_messages_for_model: Vec<String>,
+    updated_tool_output: Option<Value>,
 }
 
 pub(crate) fn preview(
@@ -88,6 +90,7 @@ pub(crate) async fn run(
             should_block: false,
             additional_contexts: Vec::new(),
             feedback_message: None,
+            updated_tool_output: None,
         };
     }
 
@@ -129,6 +132,8 @@ pub(crate) async fn run(
             .flat_map(|result| result.data.feedback_messages_for_model.clone())
             .collect(),
     );
+    let updated_tool_output =
+        updated_tool_output_for_outcome(&results, should_block, feedback_message.is_some());
 
     PostToolUseOutcome {
         hook_events: results
@@ -140,7 +145,31 @@ pub(crate) async fn run(
         should_block,
         additional_contexts,
         feedback_message,
+        updated_tool_output,
     }
+}
+
+/// Chooses the last-completed rewrite unless feedback supersedes normal output.
+fn updated_tool_output_for_outcome(
+    results: &[dispatcher::ParsedHandler<PostToolUseHandlerData>],
+    should_block: bool,
+    has_feedback: bool,
+) -> Option<Value> {
+    if should_block || has_feedback {
+        return None;
+    }
+
+    results
+        .iter()
+        .filter_map(|result| {
+            result
+                .data
+                .updated_tool_output
+                .clone()
+                .map(|updated_tool_output| (result.completion_order, updated_tool_output))
+        })
+        .max_by_key(|(completion_order, _)| *completion_order)
+        .map(|(_, updated_tool_output)| updated_tool_output)
 }
 
 /// Serializes command stdin for a selected `PostToolUse` hook.
@@ -178,6 +207,7 @@ fn parse_completed(
     let mut should_block = false;
     let mut additional_contexts_for_model = Vec::new();
     let mut feedback_messages_for_model = Vec::new();
+    let mut updated_tool_output = None;
 
     match run_result.error.as_deref() {
         Some(error) => {
@@ -209,6 +239,9 @@ fn parse_completed(
                             handler,
                             additional_context,
                         );
+                    }
+                    if parsed.invalid_reason.is_none() && parsed.invalid_block_reason.is_none() {
+                        updated_tool_output = parsed.updated_tool_output;
                     }
                     if !parsed.universal.continue_processing {
                         status = HookRunStatus::Stopped;
@@ -302,6 +335,7 @@ fn parse_completed(
             should_block,
             additional_contexts_for_model,
             feedback_messages_for_model,
+            updated_tool_output,
         },
         completion_order: 0,
     }
@@ -313,6 +347,7 @@ fn serialization_failure_outcome(hook_events: Vec<HookCompletedEvent>) -> PostTo
         should_block: false,
         additional_contexts: Vec::new(),
         feedback_message: None,
+        updated_tool_output: None,
     }
 }
 
@@ -332,6 +367,7 @@ mod tests {
     use super::command_input_json;
     use super::parse_completed;
     use super::preview;
+    use super::updated_tool_output_for_outcome;
     use crate::engine::ConfiguredHandler;
     use crate::engine::command_runner::CommandRunResult;
     use crate::events::common;
@@ -368,6 +404,7 @@ mod tests {
                 should_block: true,
                 additional_contexts_for_model: Vec::new(),
                 feedback_messages_for_model: vec!["bash output looked sketchy".to_string()],
+                updated_tool_output: None,
             }
         );
         assert_eq!(parsed.completed.run.status, HookRunStatus::Blocked);
@@ -396,6 +433,7 @@ mod tests {
                     limit: AdditionalContextLimit::from_config(Some(17)),
                 }],
                 feedback_messages_for_model: Vec::new(),
+                updated_tool_output: None,
             }
         );
         assert_eq!(
@@ -408,7 +446,7 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_updated_mcp_tool_output_fails_open() {
+    fn updated_mcp_tool_output_accepts_structured_output() {
         let parsed = parse_completed(
             &handler(),
             run_result(
@@ -425,15 +463,97 @@ mod tests {
                 should_block: false,
                 additional_contexts_for_model: Vec::new(),
                 feedback_messages_for_model: Vec::new(),
+                updated_tool_output: Some(serde_json::json!({"ok": true})),
             }
         );
-        assert_eq!(parsed.completed.run.status, HookRunStatus::Failed);
+        assert_eq!(parsed.completed.run.status, HookRunStatus::Completed);
+        assert_eq!(parsed.completed.run.entries, Vec::<HookOutputEntry>::new());
+    }
+
+    #[test]
+    fn updated_mcp_tool_output_accepts_string_output() {
+        let parsed = parse_completed(
+            &handler(),
+            run_result(
+                Some(0),
+                r#"{"hookSpecificOutput":{"hookEventName":"PostToolUse","updatedMCPToolOutput":"rewritten"}}"#,
+                "",
+            ),
+            Some("turn-1".to_string()),
+        );
+
         assert_eq!(
-            parsed.completed.run.entries,
-            vec![HookOutputEntry {
-                kind: HookOutputEntryKind::Error,
-                text: "PostToolUse hook returned unsupported updatedMCPToolOutput".to_string(),
-            }]
+            parsed.data,
+            PostToolUseHandlerData {
+                should_block: false,
+                additional_contexts_for_model: Vec::new(),
+                feedback_messages_for_model: Vec::new(),
+                updated_tool_output: Some(serde_json::json!("rewritten")),
+            }
+        );
+        assert_eq!(parsed.completed.run.status, HookRunStatus::Completed);
+    }
+
+    #[test]
+    fn last_completed_updated_tool_output_wins() {
+        let mut configured_later = parse_completed(
+            &handler(),
+            run_result(
+                Some(0),
+                r#"{"hookSpecificOutput":{"hookEventName":"PostToolUse","updatedMCPToolOutput":"configured later"}}"#,
+                "",
+            ),
+            Some("turn-1".to_string()),
+        );
+        configured_later.completion_order = 0;
+        let mut finished_later = parse_completed(
+            &handler(),
+            run_result(
+                Some(0),
+                r#"{"hookSpecificOutput":{"hookEventName":"PostToolUse","updatedMCPToolOutput":"finished later"}}"#,
+                "",
+            ),
+            Some("turn-1".to_string()),
+        );
+        finished_later.completion_order = 1;
+
+        assert_eq!(
+            updated_tool_output_for_outcome(
+                &[configured_later, finished_later],
+                /*should_block*/ false,
+                /*has_feedback*/ false,
+            ),
+            Some(serde_json::json!("finished later"))
+        );
+    }
+
+    #[test]
+    fn block_or_feedback_suppresses_updated_tool_output() {
+        let parsed = parse_completed(
+            &handler(),
+            run_result(
+                Some(0),
+                r#"{"hookSpecificOutput":{"hookEventName":"PostToolUse","updatedMCPToolOutput":"rewritten"}}"#,
+                "",
+            ),
+            Some("turn-1".to_string()),
+        );
+
+        assert_eq!(
+            updated_tool_output_for_outcome(
+                std::slice::from_ref(&parsed),
+                /*should_block*/ true,
+                /*has_feedback*/ false,
+            ),
+            None
+        );
+        assert_eq!(
+            updated_tool_output_for_outcome(
+                &[parsed],
+                /*should_block*/ false,
+                /*has_feedback*/ true,
+            ),
+            None
         );
     }
 
@@ -451,6 +571,7 @@ mod tests {
                 should_block: true,
                 additional_contexts_for_model: Vec::new(),
                 feedback_messages_for_model: vec!["post hook says pause".to_string()],
+                updated_tool_output: None,
             }
         );
         assert_eq!(parsed.completed.run.status, HookRunStatus::Blocked);
@@ -474,6 +595,7 @@ mod tests {
                 should_block: false,
                 additional_contexts_for_model: Vec::new(),
                 feedback_messages_for_model: vec!["post-tool hook says stop".to_string()],
+                updated_tool_output: None,
             }
         );
         assert_eq!(parsed.completed.run.status, HookRunStatus::Stopped);
@@ -500,6 +622,7 @@ mod tests {
                 should_block: false,
                 additional_contexts_for_model: Vec::new(),
                 feedback_messages_for_model: vec!["PostToolUse hook stopped execution".to_string()],
+                updated_tool_output: None,
             }
         );
         assert_eq!(parsed.completed.run.status, HookRunStatus::Stopped);
@@ -526,6 +649,7 @@ mod tests {
                 should_block: false,
                 additional_contexts_for_model: Vec::new(),
                 feedback_messages_for_model: Vec::new(),
+                updated_tool_output: None,
             }
         );
         assert_eq!(parsed.completed.run.status, HookRunStatus::Completed);
