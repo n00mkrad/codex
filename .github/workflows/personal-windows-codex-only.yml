@@ -1,0 +1,46 @@
+name: Personal Windows codex.exe build
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build patched codex.exe for Windows x64
+    runs-on: windows-latest
+    timeout-minutes: 90
+    defaults:
+      run:
+        working-directory: codex-rs
+
+    env:
+      TARGET: x86_64-pc-windows-msvc
+      LIBSQLITE3_FLAGS: SQLITE_DISABLE_INTRINSIC
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
+        with:
+          targets: ${{ env.TARGET }}
+
+      - name: Configure MSVC environment
+        uses: ./.github/actions/setup-msvc-env
+        with:
+          target: ${{ env.TARGET }}
+
+      - name: Build codex.exe
+        shell: bash
+        run: cargo build --release --target "$TARGET" --bin codex
+
+      - name: Upload codex.exe
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: codex-windows-x64
+          path: codex-rs/target/${{ env.TARGET }}/release/codex.exe
+          if-no-files-found: error
+          retention-days: 14
