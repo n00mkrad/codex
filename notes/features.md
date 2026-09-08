@@ -1,0 +1,189 @@
+# Under development features
+
+List of Codex agent/backend features that are flagged as "under development" and are disabled by default but can be enabled via config.
+
+## Template
+
+```markdown
+### feature_name
+
+<Description of the feature, what it does in practice, if it appears to supersede existing features, etc. - 2-4 sentences>
+
+**Usability:** <Describes if, or to what extent, the feature is usable in frontends (e.g. TUI, VS Code extension) - Important to know if a feature is functional in the backend but not usable in any frontend - 1 short sentence>
+```
+
+## Feature List
+
+### image_resize_notice
+
+When image preparation resizes a data-URL image, this adds a separate developer message describing each affected image's original and prepared dimensions. It applies to images in user messages and tool outputs such as `view_image`, and the notice is persisted in history/rollouts and included in the model request alongside the resized image; it augments rather than replaces the existing image-preparation behavior.
+
+**Usability:** The notice is available to backend and app-server raw-response-item consumers, but the TUI does not render it as ordinary chat content.
+
+### local_thread_store_compression
+
+When enabled for the local thread store, a best-effort startup worker scans active and archived rollout files and replaces files that have been cold for at least seven days with zstd-compressed `.jsonl.zst` files, including rollouts used as shared-history ancestors. Current readers stream compressed rollouts transparently, while append/resume and some new-reference operations materialize them back to plain JSONL; the worker verifies the compressed copy and preserves file metadata before deleting the original.
+
+**Usability:** This is transparent storage infrastructure with no frontend control or visible UI, although all frontends using the local thread store benefit from the reduced disk usage.
+
+### apply_patch_streaming_events
+
+While the model is still generating a freeform `apply_patch` call, this parses the streamed patch input and emits `PatchApplyUpdated` events containing the latest structured snapshot of the file changes before the patch is executed. Snapshots identify each parsed path and add, delete, or update change, including partial file contents or update diffs; after the first update, emissions are coalesced for about 500 ms and the latest pending snapshot is flushed when the call ends. It only covers the custom/freeform `apply_patch` tool path, not ordinary function calls or patches embedded in shell commands, and incomplete input produces no update until it becomes parseable.
+
+**Usability:** App-server v2 exposes these as `item/fileChange/patchUpdated` notifications for clients to render, but the in-repo TUI currently ignores them and therefore shows no live patch preview.
+
+### mcp_2026_07_28
+
+Enabling this selects MCP 2026-07-28 compatibility: streamable HTTP clients prefer `server/discover` and modern request metadata, while falling back to legacy `initialize` when the server only supports older protocol versions. Modern tool calls and resource reads can complete over multiple rounds using opaque request state plus elicitation/input responses; stdio uses the mode only when the server opts in with `CODEX_MCP_PROTOCOL_VERSION=2026-07-28` and then uses bounded JSON-RPC line framing.
+
+**Usability:** The TUI and app-server expose MCP elicitation request/response plumbing, so user-interactive modern tools and resources can pause and resume, while legacy servers remain usable through fallback.
+
+### non_prefixed_mcp_tool_names
+
+When enabled, MCP tools are exposed to the model without the legacy `mcp__` namespace prefix, so `mcp__rmcp__echo` becomes `rmcp__echo`; this applies to ordinary MCP calls and code-mode nested tools. A table configuration can list exact server names that omit the prefix while other servers retain it, and the normal sanitization, uniqueness, and hash-suffix handling still applies. Dispatch continues to use the original MCP server and tool names, while MCP hook payloads keep the stable `mcp__...` naming form.
+
+**Usability:** The shared backend makes this usable from the TUI, app-server, and code mode through configuration, but there is no dedicated frontend toggle and hook matchers should use the prefixed form.
+
+### artifact
+
+In the current checkout, this flag is effectively a no-op: `Feature::Artifact` remains registered as under development and can be enabled by the feature parser, but no artifact tool, handler, runtime, protocol surface, or frontend consumer remains, and the config schema deliberately omits the key. Earlier commits used it to gate native presentation/spreadsheet tools and then a freeform JavaScript `artifacts` tool backed by `@oai/artifact-tool`; that implementation was removed, so enabling the flag does not expose those capabilities now. The separate `thread_artifacts` storage model and migration are not connected to this feature flag.
+
+**Usability:** None in the current build - enabling it produces no user-visible behavior.
+
+### background_paginated_rollout_migration
+
+For the local thread store, this starts a background one-shot migration that discovers active and archived legacy `.jsonl` or `.jsonl.zst` rollouts, canonicalizes their old records and rollback boundaries, materializes their SQLite history projection, and atomically publishes the rollout in paginated-history format while preserving compression and file metadata. A persisted creation-order cursor with a 48-hour lookback avoids rescanning everything on every startup; malformed, empty, and ordinary failed rollouts are recorded as skips so they do not block newer threads, while busy rollouts are retried later. Writer and maintenance locks, staged files, and a per-thread journal make concurrent archive/compression moves and interrupted publication recoverable, and app-server runtime enablement starts the worker once without providing a rollback path.
+
+**Usability:** The TUI and app-server benefit automatically from migrated history, but no migration progress or completion UI is exposed; app-server can enable it through its experimental feature-enablement request.
+
+### omit_app_server_notification_media
+
+When enabled for a conversation, app-server `item/started`, `item/completed`, and `rawResponseItem/completed` notifications have inline image and audio content removed before delivery. It also removes MCP result image/audio items and binary resource blobs and clears image-generation results, while retaining text, metadata, encrypted content, and local media references; the filter does not change model input, stored thread data, or unrelated notifications such as realtime audio events. The feature applies only to outgoing app-server notifications, so thread reads and other APIs can still return the original media.
+
+**Usability:** App-server clients can use it to reduce notification payload size and media exposure, but the direct TUI event stream and its user-facing settings have no dedicated support.
+
+### powershell_shell_version
+
+When enabled, Codex runs the selected local PowerShell executable with `-NoProfile -NonInteractive` and `$PSVersionTable.PSVersion.ToString()`, then exposes only its major and minor version in the model's `<environment_context>` as `<shell_version>` (for example, `5.1` or `7.4`). It runs only for exactly one ready local PowerShell environment, uses a two-second timeout, caches results by executable path including failures, and does not change shell selection or execution. If a previously visible version becomes unavailable, the next context diff explicitly marks it as unavailable so the model does not keep stale information.
+
+**Usability:** This is model-only context used by the TUI and app-server through shared core configuration, with no dedicated frontend display or control.
+
+### bedrock_setup_wizard
+
+When enabled, eligible first-run TUI onboarding adds an "Use Amazon Bedrock" sign-in option. The wizard discovers local AWS profiles and environment credentials, then can configure a profile or environment credentials, save AWS access keys, or save a Bedrock API key; successful setup selects the `amazon-bedrock` model provider and persists the relevant provider settings. It appears only for the embedded app server with an unauthenticated default OpenAI provider and API login allowed, and the underlying app-server Bedrock RPCs are not themselves gated by this feature.
+
+**Usability:** Fully usable in the TUI's initial onboarding flow; there is no separate settings UI, while app-server clients can call the experimental Bedrock RPCs independently.
+
+### psp
+
+When enabled, the effective HTTP client factory adds the process-scoped `oai-chat-psp=true` cookie to HTTPS requests for allowlisted ChatGPT hosts, allowing first-party ChatGPT services to route the request through PSP without changing the endpoint URL. Cookie-aware ChatGPT clients use it for first-party requests such as model discovery, authentication, task, and connector APIs, while API-host and arbitrary/custom-host requests do not receive the cookie; the client keeps the existing outbound proxy policy and only combines the marker with permitted Cloudflare affinity cookies. It changes routing selection at the service boundary and does not change model behavior, request payloads, or MCP traffic.
+
+**Usability:** TUI and app-server requests that use ChatGPT authentication inherit the routing automatically from configuration, with no dedicated frontend control or visible UI.
+
+### chronicle
+
+In the current checkout, `Feature::Chronicle` is only a registered under-development flag, with the legacy `[features].telepathy` key mapped to it. No production code checks the flag, so enabling it does not launch a Chronicle/Telepathy sidecar, capture screen context, or change model prompts. The memories subsystem can ingest and prune externally supplied `memories/extensions/chronicle/` resources through its generic extension mechanism, but that mechanism is driven by `memory_tool`, not this flag.
+
+**Usability:** There is no direct Chronicle functionality in the TUI or app-server; only generic memory-extension handling is usable when another component supplies the files.
+
+### mcp_oauth_refresh_coordination
+
+This flag selects a `Coordinated` MCP OAuth refresh mode, but in the current checkout the RMCP client immediately reports that coordination is unavailable and continues with the legacy path. The underlying OAuth persistor already performs cross-process locking, authoritative credential rereads, serialized refresh/persist transactions, and adoption of credentials refreshed by another process independently of this flag, so enabling it adds none of those behaviors. Because the selected mode is included in MCP connection identity, changing the flag during runtime configuration refresh can force an MCP reconnect; leaving it unchanged does not.
+
+**Usability:** TUI and app-server configuration can enable it, but the only observable effects are the warning and possible reconnect, not a distinct OAuth behavior.
+
+### realtime_conversation
+
+When enabled for a thread, this unlocks the experimental app-server `thread/realtime/*` API: clients can start and stop a live voice or text session, send audio, text, or speech input, list supported voices, and receive transcript, audio, SDP, item, error, and close notifications. Sessions can use WebSocket, WebRTC from a browser SDP offer, or attach to an existing realtime call; V1, V2, and V3 select legacy Bidi, Realtime Voice, or Frameless Bidi behavior, with optional bounded startup context, V3 initial items, Codex handoff modes, automatic agent responses, and durable realtime timeline items for paginated threads. The RPCs also require the app-server client's `experimentalApi` capability, and requests against a thread created without this feature fail with an invalid-request error; WebRTC does not support V2 and existing-call attachment accepts only a restricted set of options.
+
+**Usability:** The backend and app-server protocol are functional for custom clients, including browser/WebRTC clients, while the in-repo TUI only routes or ignores the notifications and provides no realtime capture or control UI.
+
+### request_permissions_tool
+
+When enabled and a runtime environment is available, Codex exposes the model-invoked `request_permissions` tool, which asks the host/client for additional filesystem or network permissions for a selected environment; relative paths resolve against that environment's cwd. A client can grant a subset at turn or session scope, and the grant is intersected with the originating sandbox policy before being applied automatically to later shell-like commands and `apply_patch` calls, with optional turn-scoped strict auto-review. `AskForApproval::Never` or granular approval with `request_permissions = false` auto-denies without prompting, while interactive approval is presented through the TUI or app-server; this is separate from inline `with_additional_permissions` command approvals.
+
+**Usability:** Fully usable in the core, TUI approval overlay, and app-server clients, including remote environments; it has no effect unless enabled and invoked by the model.
+
+### code_mode
+
+When enabled, turns whose model metadata does not specify a tool mode default to `CodeMode`: the model receives a freeform `exec` tool and a JSON `wait` tool, and raw JavaScript runs in a V8-based code-mode host with helpers such as `tools.<name>`, `ALL_TOOLS`, `text`, `image`, `store`/`load`, and `yield_control`. JavaScript can compose eligible Codex tools, whose calls still use normal dispatch, approvals, and sandboxing; an execution can yield a cell for later waiting or termination, while ordinary direct tools remain available alongside the code-mode tools. A model-provided `tool_mode` takes precedence over this flag, and an unavailable host makes ordinary Code Mode fall back to direct tools unless fail-closed behavior is configured.
+
+**Usability:** Usable through the shared core in the TUI and app-server as a model-facing capability with no dedicated frontend UI; execution requires the code-mode host to be available.
+
+### code_mode_interrupt
+
+When enabled alongside Code Mode, interrupting a turn terminates every currently active code-mode cell in that session, including a cell that yielded to run in the background and cells waiting on nested tool calls. The termination happens only for `TurnAbortReason::Interrupted`, not budget-limited turns; it does not enable Code Mode itself, and it leaves the reusable code-mode session state intact for later turns. After interruption, waiting on the terminated cell reports it as missing, while nested tool calls finish as aborted.
+
+**Usability:** The normal TUI interrupt and app-server turn-interrupt APIs trigger it through shared core logic, but there is no separate frontend control or visible status indicator.
+
+### respect_system_proxy
+
+When enabled, Codex's shared HTTP client factory resolves a route for each destination using the host's system proxy settings before falling back to proxy environment variables (`HTTPS_PROXY`, `HTTP_PROXY`, `ALL_PROXY`, and `NO_PROXY`) and then a direct connection. On Windows this consults the current user's WinHTTP/Internet settings, explicit PAC URLs, WPAD auto-detection, static proxies, and bypass rules; macOS uses SystemConfiguration/CFNetwork, while platforms without a system resolver use the environment fallback. Route-aware clients cache route-specific transports and manually re-resolve redirects so a URL is not sent through a client selected for a different destination; this covers Codex-owned HTTP traffic such as auth, model/API, MCP, catalog, plugin, and update requests, but does not alter shell subprocess networking, and project-local config cannot enable the flag.
+
+**Usability:** TUI and app-server traffic inherits the setting from shared configuration, with no dedicated frontend control or visible UI.
+
+### code_mode_only
+
+When enabled, this automatically enables Code Mode and makes `CodeModeOnly` the default tool mode for models whose metadata does not specify one. The model sees the Code Mode `exec` and `wait` entrypoints, while tools that can run as nested Code Mode calls - including shell, patch, dynamic, and eligible MCP/app tools - are removed from the top-level tool list and exposed through JavaScript helpers such as `tools.<name>` and `ALL_TOOLS`; direct-only exceptions such as `request_user_input` remain available, and configured namespaces can be forced to stay direct or be excluded from Code Mode. An explicit model `tool_mode` overrides the feature, and unlike ordinary Code Mode, an unavailable host never falls back to direct tools: the Code Mode call remains advertised but fails closed.
+
+**Usability:** Usable by TUI and app-server model turns through configuration, with no dedicated frontend control; models without Code Mode support receive a warning.
+
+### retain_client_developer_messages
+
+When enabled, developer-role response items supplied through client injection paths such as app-server `thread/inject_items` or application additional context are tagged with private `client_authored` history metadata and persisted in the rollout; the metadata is stripped before provider requests. During Remote Compaction V2, these tagged messages are retained in the replacement history even though ordinary developer messages are discarded, and during Token Budget context resets they are copied into the new window; retention is bounded by a 64,000-token budget and may truncate or drop older messages. The flag has no effect on ordinary developer instructions, legacy remote compaction, or local summarization, and messages injected while it is disabled are not retroactively tagged.
+
+**Usability:** App-server clients can supply the retained context through raw item injection or application context, while the TUI has no dedicated control or visible indicator.
+
+### code_mode_prewarm
+
+When enabled, each newly created thread asynchronously opens its durable Code Mode session during startup if a Code Mode host is available, so the first `exec` call can reuse the established session and avoid its connection/setup latency; it does not execute JavaScript or change model-visible tools. It runs independently of the `code_mode` feature, but is skipped when the host provider is disabled or unavailable; startup failures are logged without failing thread creation, and shutdown does not wait indefinitely for a stalled prewarm. Local threads lazily start the host process, while app-server can prewarm a configured remote gRPC host; the host or transport may be shared across threads, but session state remains per thread.
+
+**Usability:** TUI and app-server threads benefit transparently from lower first-use latency, with configuration as the only control and no visible status UI.
+
+### concurrent_reasoning_summaries
+
+Despite its name, the current implementation is a reasoning-summary delivery mode rather than a compaction optimization. For OpenAI Responses requests that actually request a supported reasoning summary, it adds `stream_options.reasoning_summary_delivery = "sequential_cutoff"` on both HTTP and WebSocket requests, including WebSocket prewarm requests; this lets summary generation overlap with reasoning and allows an unfinished trailing summary section to be cut off when reasoning finishes. The client suppresses incremental summary-delta and summary-part events, then emits each completed `reasoning_summary_text.done` section as one reasoning update, with section breaks between completed sections; non-OpenAI providers, requests without summaries, compaction, and ordinary model output are unchanged.
+
+**Usability:** TUI and app-server users see completed reasoning sections through the normal event stream, but have no frontend control over this delivery mode.
+
+### rollout_budget
+
+When enabled with a positive `limit_tokens` and reminder thresholds, this enforces one weighted usage budget shared by a root thread and its sub-agents. Each completed response consumes provider-reported `codex_rollout_budget_units` when present; otherwise it consumes `output_tokens * sampling_token_weight` plus non-cached input tokens * `prefill_token_weight`, with both weights defaulting to 1.0. Before sampling, the model receives a developer `<rollout_budget>` message showing the remaining weighted tokens, initially and whenever configured thresholds are crossed; a new context window or rollback causes the current remainder to be restated. Once usage reaches the limit, the current or later turn fails with `SessionBudgetExceeded` (including compaction), and the response can overshoot because accounting occurs after a completed response rather than reserving a per-request amount; invalid provider units fail fatally without retry.
+
+**Usability:** It is usable through shared core behavior in the TUI and app-server, which surface the standard error, but neither frontend provides a dedicated budget display or control.
+
+### context_management
+
+When enabled at thread startup, this is an eligibility-gated activation switch for Codex's native context and history management. With ChatGPT authentication on a Plus, Pro, or ProLite account, an OpenAI Codex backend route, and no API-key or alternate provider credentials, it enables the `token_budget` feature and forces its private history/notes extension: the model gets context-window metadata and `new_context`/remaining-context behavior, can use private `history` and `notes` tools to recover prior windows and preserve notes across resets, and requests backend history ingestion. It replaces the legacy `notes.thread_hint` MCP bridge when active; other providers, auth modes, and plans get no effect.
+
+**Usability:** Usable through shared core behavior in the TUI and app-server when configured, but the history/notes tools and context metadata are model-facing and have no dedicated frontend UI.
+
+### current_time_reminder
+
+When enabled, Codex reads the current UTC time before an inference request is due and persists a developer item such as `<current_time_reminder>It is 2026-06-17 17:34:15 UTC.</current_time_reminder>` in the model context; the default interval is one second, a new context window always triggers a reminder, and `delivery_mode = "after_user_or_tool_output"` suppresses reminders during internal continuation requests until user or tool output occurs. `clock_source = "system"` uses the host clock, while `"external"` asks the app-server client through experimental `currentTime/read` (with a 10-second timeout and exactly one subscribed client); failures stop the turn before the model request. The feature also exposes the model-facing `clock.curr_time` tool, and `sleep_tool = true` can expose an input-interruptible `clock.sleep` tool using the same clock, with sleeps capped at 12 hours.
+
+**Usability:** System-clock reminders and clock tools work through the TUI and app-server, while external time requires a custom app-server client and is explicitly unsupported by the TUI.
+
+### runtime_metrics
+
+When enabled, Codex adds an OpenTelemetry manual/delta reader so the current turn can take on-demand snapshots of tool calls, API calls, SSE events, WebSocket requests/events, turn TTFT/TTFM, and Responses API timing fields. The TUI resets the snapshot at turn start, collects deltas while streaming, and accumulates them into the final turn separator; WebSocket sessions also send `x-responsesapi-include-timing-metrics: true`, which makes server overhead, inference, TTFT, and TBT values available for timing log entries and the final summary. The flag does not itself enable an OTEL metrics exporter, and the built-in Statsig exporter intentionally suppresses some metric names that a custom OTLP exporter records.
+
+**Usability:** The TUI shows collected metrics inline in turn separators and WebSocket timing entries; app-server/backend users get exporter telemetry but no dedicated runtime-metrics UI or API.
+
+### deferred_executor
+
+When enabled, selected execution environments may remain `starting` while a turn continues instead of blocking session setup until their exec-server connection and environment metadata are ready. The model sees the pending environment in `<environment_context>` and receives a `wait_for_environment` tool that waits by environment ID; until it is ready, tools tied to that environment are withheld, while already-ready environments remain usable. After a successful wait, the next model step refreshes shell/filesystem access, MCP tools, AGENTS.md, skills, plugins, permissions, guardian execution, and child-agent environment inheritance; startup failure is reported as an unavailable environment rather than granting execution.
+
+**Usability:** The shared core supports this in the TUI and app-server, but the full workflow requires a client that selects remote or provisioned environments and a model that invokes the wait tool; app-server also exposes environment registration and status APIs.
+
+### deferred_tool_world_state
+
+When enabled, Codex adds a model-visible `<tools>` developer world-state fragment listing namespaces whose tools are deferred, using a bounded one-line description for each namespace. The namespace map is persisted in rollout world state, so unchanged turns and resumed threads do not repeat it; additions, removals, description changes, and the transition to no remaining namespaces are sent as compact updates, with a 4 KiB rendered-fragment cap. It does not change which tools are deferred or how `tool_search` loads them - instead, the `tool_search` description omits its redundant source list because the same namespaces are already advertised in world state; empty state is neither rendered nor persisted.
+
+**Usability:** TUI and app-server users benefit through shared model context, but neither frontend renders the `<tools>` fragment as user-facing UI or provides a dedicated control.
+
+### shell_snapshot_v2
+
+When enabled with Unified Exec, Codex asks a Unix-capable exec-server to capture each eligible shell's login state once and cache it in executor memory instead of writing a snapshot file under `CODEX_HOME`. Later direct `bash`, `zsh`, or `sh` commands in the same thread/environment restore functions, aliases, shell options, and policy-filtered exported variables, with explicit command environment overrides winning; captures are sandboxed, capped at 512 KiB, time out after 10 seconds, and failed captures fall back to normal execution with bounded retries. The first turn can asynchronously prewarm local snapshots after hooks when the project is trusted and no network proxy or network policy is active; remote Unix executors use lazy capture, while non-Unix executors and PowerShell/Cmd are unsupported, and eligible Unified Exec sessions replace the legacy file-backed snapshot path.
+
+**Usability:** This is transparent to TUI and app-server shell commands on Unix executors that advertise the capability, with no frontend UI; local Windows execution does not use it.
