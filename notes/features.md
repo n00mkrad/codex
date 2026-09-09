@@ -275,3 +275,11 @@ When enabled for Unified Exec, Codex records each background terminal's launch s
 When enabled, each turn's diff tracker uses every selected environment's current working directory as its display root instead of first searching upward for the nearest Git root. Thus a change to `/repo/subdir/work.txt` from cwd `/repo/subdir` is emitted as `a/work.txt` / `b/work.txt` rather than the default Git-root-relative `a/subdir/work.txt` / `b/subdir/work.txt`; this changes only paths in the synthesized turn diff, not patch execution or change tracking. The root is chosen independently per environment, multi-environment diffs retain their environment prefix, and paths that cannot be made relative to the chosen cwd fall back to their inferred native path.
 
 **Usability:** TUI and app-server consumers of the shared turn-diff events inherit the cwd-relative paths automatically when configured; there is no dedicated frontend toggle.
+
+### enable_mcp_apps
+
+This is currently a registry-only, effectively no-op feature flag. It was introduced as an under-development boolean and added to the generated configuration schema, but no runtime path on this branch consumes `Feature::EnableMcpApps`. Enabling or disabling `[features].enable_mcp_apps` therefore does not change MCP server registration, tool discovery/exposure, Apps UI behavior, or MCP calls.
+
+The functionality its name suggests is instead owned by the separate `apps` feature, which is stable and enabled by default. `Config::to_mcp_config` derives `McpConfig.apps_enabled` from `Feature::Apps`, and the MCP runtime combines that value with ChatGPT/Codex-backend authentication to decide whether the host-owned `codex_apps` MCP server is available. That server now points at the plugin-service `/ps/mcp` hosted runtime and carries connector actions as MCP tools plus hosted skills as MCP resources. None of those paths consult `enable_mcp_apps`.
+
+**Usability:** Not useful on this branch; the key is accepted by config and remains listed as under development, but toggling it has no observable effect. Use the stable `apps` feature to control the actual Apps/MCP integration.
